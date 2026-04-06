@@ -1,0 +1,940 @@
+================================================================================
+  수능 Sentinel - Curated Workbench : System Architecture Blueprint
+  Version 1.1 | 2026-04-05
+================================================================================
+
+
+[0] EXECUTIVE SUMMARY
+================================================================================
+
+수능 영어 문항 출제를 위한 end-to-end 워크벤치.
+학술 소스에서 지문을 검색/추출 -> 적합성 평가 -> 문항 생성 -> 해설 작성의
+전체 파이프라인을 하나의 대시보드에서 수행한다.
+
+핵심 설계 원칙:
+  1. Verbatim-only: 원문에서 한 글자도 변형 없이 추출. 환각 원천 차단.
+  2. Human-in-the-loop: 모든 단계에서 사용자 피드백 -> 모델 품질 점진 향상.
+  3. Engine 분리: 검색/평가 | 문항생성 | 해설작성 을 독립 엔진으로 설계.
+  4. Claude API 우선: RunPod/HuggingFace는 fine-tuning 필요시에만 사용.
+  5. Seed-first: 실제 평가원 기출 데이터로 cold start 해결 후 피드백으로 점진 개선.
+
+
+[1] TECH STACK
+================================================================================
+
+Layer           | Technology                  | Rationale
+----------------+-----------------------------+----------------------------------
+Frontend        | Next.js 14 (App Router)     | SSR + API routes 일체형
+                | React + TypeScript          |
+                | Tailwind CSS + shadcn/ui    | 빠른 UI 개발
+                | Zustand                     | 가벼운 상태관리 (pane간 데이터 흐름)
+----------------+-----------------------------+----------------------------------
+Backend API     | Next.js API Routes          | 프론트와 동일 프로젝트에서 관리
+                | (or FastAPI if decoupled)   | 향후 분리 필요시 FastAPI로 전환 가능
+----------------+-----------------------------+----------------------------------
+AI Layer        | Claude API (primary)        | 지문 평가, 문항 생성, 해설 작성
+                | Tool/Function Calling       | 단어 수 계산, verbatim 검증 등
+                | HuggingFace (optional)      | fine-tuned 평가모델 (향후 고려)
+                | RunPod (optional)           | fine-tuning 실행 환경
+----------------+-----------------------------+----------------------------------
+Database        | PostgreSQL (Supabase)       | 지문, 피드백, 문항, 점수 저장
+                | pgvector extension          | 지문 임베딩 유사도 검색
+----------------+-----------------------------+----------------------------------
+Crawl/Search    | Semantic Scholar API        | 학술 논문 검색 (무료, 풍부)
+                | arXiv API                   | arXiv 논문 전문 접근
+                | CrossRef API                | DOI 기반 메타데이터
+                | Unpaywall API               | Open Access 전문 URL 확보
+                | (JSTOR 추후 확인 필요)      | API 접근 제한적일 수 있음
+----------------+-----------------------------+----------------------------------
+Infra           | Vercel (frontend)           | Next.js 네이티브 배포
+                | Railway or Supabase (DB)    | managed PostgreSQL
+                | RunPod (GPU, optional)      | fine-tuning 전용
+
+
+[2] SYSTEM ARCHITECTURE DIAGRAM
+================================================================================
+
+  +------------------------------------------------------------------+
+  |                        FRONTEND (Next.js)                        |
+  |                                                                  |
+  |  +------------+  +-------------+  +------------+  +-----------+  |
+  |  |  PANE 1    |  |  PANE 2     |  |  PANE 3    |  | PANE 4    |  |
+  |  |  Search &  |  |  Passage    |  |  Question  |  | Explan.   |  |
+  |  |  Crawl     |->|  Review &   |->|  Generation|->| Generator |  |
+  |  |            |  |  Feedback   |  |  & Feedback|  | (future)  |  |
+  |  +------+-----+  +------+------+  +------+-----+  +-----+-----+  |
+  |         |               |                |               |       |
+  +---------|---------------|----------------|---------------|-------+
+            |               |                |               |
+            v               v                v               v
+  +------------------------------------------------------------------+
+  |                     API LAYER (Next.js Routes)                   |
+  |                                                                  |
+  |  /api/crawl    /api/passages   /api/generate    /api/explain     |
+  |  /api/feedback /api/scores     /api/items       /api/export      |
+  +---------------------------+--------------------------------------+
+                              |
+              +---------------+----------------+
+              |               |                |
+              v               v                v
+  +-----------+--+  +---------+------+  +------+---------+
+  |   ENGINE 1   |  |   ENGINE 2     |  |   ENGINE 3     |
+  |  Crawl &     |  |  Question      |  |  Explanation   |
+  |  Evaluate    |  |  Generation    |  |  Generation    |
+  +-----------+--+  +---------+------+  +------+---------+
+              |               |                |
+              v               v                v
+  +-----------+---------------+----------------+---------+
+  |                    Claude API                        |
+  |  (with Tool/Function Calling)                        |
+  +---------------------------+--------------------------+
+                              |
+                              v
+  +---------------------------+--------------------------+
+  |              PostgreSQL + pgvector                   |
+  |  passages | feedback | scores | items | explanations |
+  +------------------------------------------------------+
+              |
+              v  (optional, Phase 2+)
+  +-----------+--------------+
+  |  RunPod + HuggingFace    |
+  |  Fine-tuning Pipeline    |
+  +--------------------------+
+
+
+[3] ENGINE 1: CRAWL & EVALUATE (Pane 1 + Pane 2)
+================================================================================
+
+--- 3.1 Crawl Pipeline ---
+
+  [사용자 입력]
+      |
+      | keyword, topic, question_type (빈칸, 순서, 주제 등)
+      v
+  [Search Orchestrator]
+      |
+      +-> Semantic Scholar API  --+
+      +-> arXiv API              +-->  [Raw Results Aggregator]
+      +-> CrossRef + Unpaywall   --+         |
+                                             v
+                                    [Full-text Fetcher]
+                                    (Open Access PDF/HTML 다운로드)
+                                             |
+                                             v
+                                    [Passage Extractor]  <-- Claude API
+                                    (원문에서 155~180 word 구간 추출)
+                                             |
+                                             v
+                                    [Verbatim Validator]
+                                    (추출된 텍스트가 원문에 정확히 존재하는지 검증)
+                                             |
+                                             v
+                                    [Word Count Tool]
+                                    (정확한 단어 수 산출 - function calling)
+                                             |
+                                             v
+                                    [Quality Scorer]  <-- Claude API
+                                    (적합도 점수 + 유형 태깅)
+                                             |
+                                             v
+                                    [DB 저장 + Pane 2 표시]
+
+
+--- 3.2 Verbatim 보장 메커니즘 ---
+
+  핵심: Claude에게 "생성"이 아닌 "위치 지정"만 시킴.
+
+  방법:
+  1. 원문 전문을 Claude에게 전달
+  2. Claude는 시작 문장과 끝 문장의 위치(index)만 반환
+  3. 백엔드가 해당 위치를 기반으로 원문에서 직접 슬라이싱
+  4. 슬라이싱 결과를 다시 원문과 대조하여 100% 일치 검증
+  5. 불일치 시 reject 처리
+
+  Claude Tool Schema:
+
+  {
+    "name": "extract_passage",
+    "description": "원문에서 수능 지문으로 적합한 구간의 위치를 지정",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "start_sentence_index": {
+          "type": "integer",
+          "description": "추출 시작 문장의 인덱스 (0-based)"
+        },
+        "end_sentence_index": {
+          "type": "integer",
+          "description": "추출 종료 문장의 인덱스 (inclusive)"
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "이 구간을 선택한 이유"
+        }
+      },
+      "required": ["start_sentence_index", "end_sentence_index", "reasoning"]
+    }
+  }
+
+
+--- 3.3 Word Count Tool (Function Calling) ---
+
+  {
+    "name": "count_words",
+    "description": "주어진 영문 텍스트의 정확한 단어 수를 반환",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "단어 수를 셀 텍스트"
+        }
+      },
+      "required": ["text"]
+    }
+  }
+
+  *실제 단어 수 계산은 백엔드에서 수행 (split by whitespace).
+  Claude가 단어를 "세는" 것이 아니라, tool을 호출하여 정확한 값을 받음.
+  155~180 범위 밖이면 구간 재조정 요청.
+
+
+--- 3.4 Quality Scoring System ---
+
+  점수 체계 (각 0~10, 총 100점 환산):
+
+  Metric                  | Weight | Description
+  ------------------------+--------+--------------------------------------------
+  topic_depth             |  15%   | 주제의 깊이/학술성 (너무 쉽거나 어렵지 않은)
+  logical_structure       |  20%   | 논리 전개의 명확성 (주장-근거-결론)
+  standalone_coherence    |  15%   | 발췌만으로 의미가 완결되는 정도
+  vocabulary_level        |  15%   | 수능 수준에 적합한 어휘 난이도
+  question_type_fit       |  20%   | 특정 문항 유형에 얼마나 잘 맞는지
+  distractor_potential    |  15%   | 매력적인 오답 선지 생성 가능성
+
+  유형 태깅 (다중 선택 가능, 12개 유형):
+  - 20번 주장 (claim)
+  - 21번 함축 의미 (implication)
+  - 22번 요지 (gist)
+  - 23번 주제 (topic)
+  - 24번 제목 (title)
+  - 29번 어법 (grammar)
+  - 30번 어휘 (vocabulary)
+  - 31~34번 빈칸 추론 (blank)
+  - 35번 무관한 문장 (irrelevant)
+  - 36~37번 순서 배열 (order)
+  - 38~39번 문장 삽입 (insertion)
+  - 40번 요약문 (summary)
+  * 41~42번 장문A는 title + vocabulary 복합 (jangmun_title, jangmun_vocabulary)
+
+  사용자 워크플로우:
+  1. Claude가 각 metric 점수 + 유형 태그를 자동 산출
+  2. Pane 2에 점수와 태그 표시
+  3. 사용자가 점수/태그를 수정 가능 (인라인 편집)
+  4. 수정된 값은 feedback DB에 저장
+  5. 향후 평가 시 최근 N개 피드백을 few-shot example로 주입
+
+
+[4] SEED DATA & FEEDBACK LEARNING SYSTEM
+================================================================================
+
+--- 4.0 Seed Data: 평가원 기출 기반 초기 학습 데이터 ---
+
+  *** Cold Start 문제 ***
+  피드백이 0건인 초기 상태에서 Claude는 "수능 지문다움"의 기준이 없음.
+  실제 평가원 기출 문항을 Golden Dataset으로 제공하여 해결.
+
+  *** 데이터 파일 구조 ***
+  seed-data/
+  ├── passages/           # 유형별 기출 지문 (JSONL 포맷)
+  │   ├── blank.jsonl     # 빈칸 추론
+  │   ├── order.jsonl     # 순서 배열
+  │   ├── insertion.jsonl # 문장 삽입
+  │   ├── topic.jsonl     # 주제/제목
+  │   ├── main_idea.jsonl # 요지/주장
+  │   ├── vocabulary.jsonl# 어휘
+  │   └── irrelevant.jsonl# 무관한 문장
+  └── negative/
+      └── rejected.jsonl  # 부적합 예시 (경계 사례 학습용)
+
+  *** JSONL 레코드 스키마 (실제 데이터 기준) ***
+  {
+    "question_code": 230631,                   // YYMMQQ (연도+월+문항번호)
+    "question_number": 31,                     // 문항 번호
+    "question_type": "blank",                  // 유형 코드 (12종)
+    "passage": "지문 본문 + 선지 포함 텍스트",   // 시험지 원문 그대로
+    "word_count": 171,                         // 지문 단어 수
+    "answer": 2,                               // 정답 번호
+    "jangmun_set": true,                       // (선택) 장문 세트 여부
+    "jangmun_note": "장문 독해 - 제목 (41번)"   // (선택) 장문 메모
+  }
+
+  유형 코드 (12종):
+    claim | implication | gist | topic | title | grammar |
+    vocabulary | blank | irrelevant | order | insertion | summary
+
+  *** 출제 지침 데이터 (guidelines.json) ***
+  seed-data/guidelines.json에 유형별 출제 규칙을 구조화하여 저장.
+  - global: 모든 유형 공통 대전제 (단어수, 원문 훼손 지양 등)
+  - types.{type}: 유형별 passage_criteria, choice_rules, pitfalls
+  - inherits: 장문 유형은 일반 유형 규칙을 상속
+  이 데이터는 Claude system prompt에 해당 유형 규칙으로 주입됨.
+
+  *** 실제 데이터 현황 (228개 기출) ***
+  - blank: 48개 | order: 24개 | insertion: 24개 | title: 24개
+  - vocabulary: 24개 | topic: 12개 | claim: 12개 | gist: 12개
+  - implication: 12개 | grammar: 12개 | summary: 12개 | irrelevant: 12개
+
+  *** 시스템 로드 방식 ***
+
+  [서버 시작 / seed 변경 감지]
+       |
+       v
+  [Seed Loader] (src/lib/seed-loader.ts)
+       |
+       | 1. seed-data/**/*.jsonl 파일 전부 파싱
+       | 2. 각 레코드를 SeedExample 타입으로 변환
+       | 3. DB seed_examples 테이블에 upsert (중복 방지)
+       | 4. 각 지문의 embedding 생성 (pgvector)
+       v
+  [DB: seed_examples 테이블]
+       |
+       v
+  [Prompt Builder에서 활용] (아래 4.1에서 상세)
+
+--- 4.1 전략: Seed + Few-shot Retrieval (3단계 진화) ---
+
+  왜 이 방식이 최적인가:
+  - Claude API는 fine-tuning을 지원하지 않음
+  - 하지만 충분한 few-shot examples + system prompt로 동등한 효과 달성 가능
+  - 피드백이 즉시 반영됨 (학습 사이클 없음)
+  - 비용 효율적 (GPU 불필요)
+
+  *** 3단계 진화 모델 ***
+
+  Stage 1 - Seed Only (Day 1~)
+  ┌─────────────────────────────────────────────────┐
+  │  System Prompt                                  │
+  │  ├── 역할 정의 + 평가 기준                       │
+  │  ├── [이상적인 지문 예시] ← seed data에서 로드   │
+  │  │     유형별 승인 예시 3~5개                     │
+  │  │     부적합 예시 2~3개                          │
+  │  └── [절대 규칙] verbatim 등                     │
+  └─────────────────────────────────────────────────┘
+  - 사용자 피드백 없이 seed data만으로 운영
+  - 이 단계에서도 유의미한 지문 선별 품질 확보
+
+  Stage 2 - Seed + Feedback (피드백 축적 시작 후)
+  ┌─────────────────────────────────────────────────┐
+  │  System Prompt                                  │
+  │  ├── 역할 정의 + 평가 기준                       │
+  │  ├── [이상적인 지문 예시] ← seed data            │
+  │  │     (기출 기반, 변하지 않는 골든 기준)          │
+  │  ├── [사용자 피드백 예시] ← feedback DB           │
+  │  │     pgvector 유사도로 검색한 최근 피드백        │
+  │  │     승인 예시 + 거부 예시                      │
+  │  └── [절대 규칙]                                 │
+  └─────────────────────────────────────────────────┘
+  - Seed = 불변의 기준선 (anchor)
+  - Feedback = 사용자 취향/미세 조정 반영
+  - 두 소스 모두 활용하되, 최근 피드백에 가중치
+
+  Stage 3 - Feedback Dominant (피드백 100+개 후)
+  ┌─────────────────────────────────────────────────┐
+  │  System Prompt                                  │
+  │  ├── 역할 정의 + 평가 기준                       │
+  │  ├── [기준 예시] ← seed 핵심 3개만 유지           │
+  │  ├── [학습된 패턴] ← feedback DB                  │
+  │  │     유사도 Top-K + 최근 피드백 혼합             │
+  │  │     (context window 제한 내에서 최적 배분)      │
+  │  └── [절대 규칙]                                 │
+  └─────────────────────────────────────────────────┘
+  - Seed는 anchor 역할만 (최소화)
+  - 대부분의 few-shot 슬롯을 실제 피드백이 차지
+  - 사용자의 고유한 평가 기준이 모델에 체화됨
+
+  *** Example Selection 알고리즘 ***
+
+  def select_examples(query_passage, question_type, stage):
+      MAX_EXAMPLES = 10  # context window budget
+
+      # 항상 seed에서 기본 예시 확보
+      seed_approved = get_seed_by_type(question_type, approved=True)
+      seed_rejected = get_seed_by_type(question_type, approved=False)
+
+      if stage == 1:  # seed only
+          return seed_approved[:5] + seed_rejected[:3]
+
+      # feedback DB에서 유사 예시 검색
+      similar_feedback = pgvector_search(
+          query=embed(query_passage),
+          filter_type=question_type,
+          limit=MAX_EXAMPLES
+      )
+
+      if stage == 2:  # seed + feedback
+          seed_slots = 4
+          feedback_slots = MAX_EXAMPLES - seed_slots
+          return (seed_approved[:2] + seed_rejected[:2] +
+                  similar_feedback[:feedback_slots])
+
+      if stage == 3:  # feedback dominant
+          seed_slots = 2
+          feedback_slots = MAX_EXAMPLES - seed_slots
+          return (seed_approved[:1] + seed_rejected[:1] +
+                  similar_feedback[:feedback_slots])
+
+  *** Feedback DB 저장 구조 ***
+
+  [사용자 피드백 입력]
+       |
+       v
+  [Feedback DB 저장]
+  {
+    passage_id, passage_text, source_url, word_count,
+    ai_scores: {topic_depth: 7, ...},
+    user_scores: {topic_depth: 9, ...},   // 사용자 수정값
+    user_comment: "논리 전개가 매우 좋음",
+    question_types: ["blank", "order"],
+    approved: true/false,
+    created_at: timestamp
+  }
+       |
+       v
+  [다음 평가 요청 시]
+       |
+       +-> pgvector로 유사한 과거 피드백 Top-K 검색
+       +-> Seed data와 합쳐서 System prompt에 삽입
+       |
+       v
+  [Claude가 학습된 기준으로 평가]
+
+--- 4.2 향후 확장: RunPod Fine-tuning (Phase 3, Optional) ---
+
+  피드백 데이터가 충분히 쌓이면 (500+ examples):
+
+  1. Seed data + Feedback DB에서 학습 데이터 export
+  2. HuggingFace 모델 선택 (추천: Mistral-7B 또는 Llama-3-8B)
+  3. RunPod에서 LoRA fine-tuning 실행
+  4. Fine-tuned 모델을 RunPod Serverless로 배포
+  5. 평가 엔진에서 Claude 대신 (또는 병행) 사용
+
+  이 전환은 비용 절감 + 일관성 향상이 검증될 때만 진행.
+  초기에는 Claude API + seed/feedback few-shot만으로 충분.
+
+
+[5] ENGINE 2: QUESTION GENERATION (Pane 3)
+================================================================================
+
+--- 5.1 Flow ---
+
+  [Pane 2에서 승인된 지문들]
+       |
+       | 사용자 선택 (개별 / Select All)
+       v
+  [문항 생성 요청]
+       |
+       v
+  [Claude API Call]
+       |
+       | System Prompt:
+       |   - 수능 영어 문항 출제 가이드라인
+       |   - 유형별 출제 규칙 (과거 피드백 반영)
+       |   - 과거 승인된 문항 few-shot examples
+       |
+       | User Message:
+       |   - 지문 원문 (verbatim)
+       |   - 지정된 문항 유형
+       |   - 난이도 지정 (선택)
+       |
+       v
+  [Claude Tool Call: generate_question]
+
+--- 5.2 Question Generation Tool Schema ---
+
+  {
+    "name": "generate_question",
+    "description": "수능 영어 문항을 생성",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "question_type": {
+          "type": "string",
+          "enum": ["blank", "order", "insertion", "topic", "main_idea",
+                   "vocabulary", "irrelevant_sentence"]
+        },
+        "question_text": {
+          "type": "string",
+          "description": "문제 지시문 (예: 다음 빈칸에 들어갈 말로 가장 적절한 것은?)"
+        },
+        "passage_modified": {
+          "type": "string",
+          "description": "문항용으로 가공된 지문 (빈칸 처리, 순서 섞기 등)"
+        },
+        "choices": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 5,
+          "maxItems": 5,
+          "description": "5개 선지"
+        },
+        "correct_answer": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "distractor_rationale": {
+          "type": "string",
+          "description": "각 오답 선지가 매력적인 이유 설명"
+        }
+      },
+      "required": ["question_type", "question_text", "passage_modified",
+                    "choices", "correct_answer", "distractor_rationale"]
+    }
+  }
+
+--- 5.3 문항 피드백 ---
+
+  Pane 3에서도 Pane 2와 동일한 피드백 루프 적용:
+
+  - 생성된 문항에 대해 사용자가 점수/코멘트 입력
+  - 승인/수정/거부 선택
+  - 수정 시: 사용자가 직접 선지, 정답 등을 수정하여 저장
+  - 피드백은 DB에 저장되어 향후 few-shot example로 활용
+
+
+[6] ENGINE 3: EXPLANATION GENERATION (Pane 4, Future)
+================================================================================
+
+  현재는 인터페이스 placeholder만 구현.
+  향후 사용자가 해설 양식 데이터를 제공하면 활성화.
+
+  설계 시 고려사항:
+  - Pane 3과 독립된 엔진으로 분리
+  - 해설 양식 템플릿을 DB에 저장하여 Claude system prompt에 주입
+  - 문항 + 정답 + 지문을 입력으로 받아 해설 생성
+  - 동일한 피드백 루프 적용
+
+  UI: Pane 3 하단에 "해설 생성" 버튼으로 확장 가능하게 설계.
+  또는 별도 탭/모달로 구현.
+
+
+[7] DATABASE SCHEMA
+================================================================================
+
+-- Seed Data (평가원 기출 골든 데이터셋)
+CREATE TABLE seed_examples (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question_code   INTEGER NOT NULL UNIQUE,  -- YYMMQQ (예: 230631)
+    question_number SMALLINT NOT NULL,
+    question_type   TEXT NOT NULL,             -- 12종 유형 코드
+    passage         TEXT NOT NULL,             -- 지문 + 선지 포함 원문
+    passage_only    TEXT,                      -- 선지 분리된 순수 지문
+    choices         JSONB,                     -- 분리된 선지 배열
+    word_count      INTEGER NOT NULL,
+    answer          SMALLINT NOT NULL,         -- 정답 번호
+    is_jangmun      BOOLEAN DEFAULT false,    -- 장문 세트 여부
+    jangmun_note    TEXT,                      -- 장문 메모
+    embedding       vector(1536),
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 원문 소스
+CREATE TABLE sources (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title           TEXT NOT NULL,
+    authors         TEXT[],
+    source_url      TEXT NOT NULL,
+    repository      TEXT NOT NULL,          -- 'arxiv', 'semantic_scholar', etc.
+    full_text       TEXT,                   -- 원문 전체
+    fetched_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 추출된 지문
+CREATE TABLE passages (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id       UUID REFERENCES sources(id),
+    text            TEXT NOT NULL,           -- verbatim 추출된 지문
+    start_index     INTEGER NOT NULL,        -- 원문 내 시작 문장 인덱스
+    end_index       INTEGER NOT NULL,        -- 원문 내 종료 문장 인덱스
+    word_count      INTEGER NOT NULL,
+    embedding       vector(1536),            -- pgvector for similarity search
+    status          TEXT DEFAULT 'pending',  -- pending | approved | rejected
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 지문 점수 (AI 산출 + 사용자 수정)
+CREATE TABLE passage_scores (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    passage_id      UUID REFERENCES passages(id),
+    scorer          TEXT NOT NULL,           -- 'ai' | 'user'
+    topic_depth     SMALLINT CHECK (topic_depth BETWEEN 0 AND 10),
+    logical_structure SMALLINT CHECK (logical_structure BETWEEN 0 AND 10),
+    standalone_coherence SMALLINT CHECK (standalone_coherence BETWEEN 0 AND 10),
+    vocabulary_level SMALLINT CHECK (vocabulary_level BETWEEN 0 AND 10),
+    question_type_fit SMALLINT CHECK (question_type_fit BETWEEN 0 AND 10),
+    distractor_potential SMALLINT CHECK (distractor_potential BETWEEN 0 AND 10),
+    total_weighted  DECIMAL(5,2),           -- 가중 합산 점수
+    question_types  TEXT[],                 -- ['blank', 'order', ...]
+    comment         TEXT,
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 생성된 문항
+CREATE TABLE questions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    passage_id      UUID REFERENCES passages(id),
+    question_type   TEXT NOT NULL,
+    question_text   TEXT NOT NULL,
+    passage_modified TEXT NOT NULL,
+    choices         JSONB NOT NULL,          -- ["선지1", "선지2", ...]
+    correct_answer  SMALLINT NOT NULL,
+    distractor_rationale TEXT,
+    status          TEXT DEFAULT 'draft',    -- draft | approved | rejected
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 문항 피드백
+CREATE TABLE question_feedback (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question_id     UUID REFERENCES questions(id),
+    score           SMALLINT CHECK (score BETWEEN 0 AND 10),
+    comment         TEXT,
+    corrections     JSONB,                   -- 사용자가 수정한 필드들
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 해설 (Phase 2)
+CREATE TABLE explanations (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question_id     UUID REFERENCES questions(id),
+    template_id     UUID,                    -- 해설 양식 참조
+    content         TEXT NOT NULL,
+    status          TEXT DEFAULT 'draft',
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 해설 양식 템플릿 (Phase 2)
+CREATE TABLE explanation_templates (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT NOT NULL,
+    structure       JSONB NOT NULL,          -- 양식 정의
+    example         TEXT,                    -- 예시 해설
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+
+[8] PROJECT STRUCTURE
+================================================================================
+
+ricemachine/
+├── ARCHITECTURE.txt            # 이 문서
+├── seed-data/                  # 평가원 기출 Golden Dataset
+│   ├── README.txt              # 작성 가이드
+│   ├── guidelines.json         # 유형별 출제 지침 (system prompt 주입용)
+│   ├── answers.json            # 시험별 전체 정답표
+│   ├── extracted_passages.json # 시험별 추출 지문 원본
+│   ├── passages/               # 유형별 기출 지문 (JSONL, 12종)
+│   │   ├── blank.jsonl         # 31~34번 빈칸 추론
+│   │   ├── order.jsonl         # 36~37번 순서 배열
+│   │   ├── insertion.jsonl     # 38~39번 문장 삽입
+│   │   ├── topic.jsonl         # 23번 주제
+│   │   ├── title.jsonl         # 24번 제목
+│   │   ├── vocabulary.jsonl    # 30번 어휘
+│   │   ├── irrelevant.jsonl    # 35번 무관한 문장
+│   │   ├── claim.jsonl         # 20번 주장
+│   │   ├── gist.jsonl          # 22번 요지
+│   │   ├── implication.jsonl   # 21번 함축 의미
+│   │   ├── grammar.jsonl       # 29번 어법
+│   │   └── summary.jsonl       # 40번 요약문
+│   └── extract_passages.py     # 지문 추출 유틸리티
+├── package.json
+├── next.config.ts
+├── tsconfig.json
+├── tailwind.config.ts
+├── .env.local                  # API keys (ANTHROPIC_API_KEY, DB URL 등)
+│
+├── src/
+│   ├── app/
+│   │   ├── layout.tsx          # Root layout
+│   │   ├── page.tsx            # Main dashboard (4-pane)
+│   │   │
+│   │   └── api/                # Backend API routes
+│   │       ├── crawl/
+│   │       │   └── route.ts    # 검색 + 크롤링 실행
+│   │       ├── passages/
+│   │       │   └── route.ts    # 지문 CRUD
+│   │       ├── evaluate/
+│   │       │   └── route.ts    # 지문 평가 (Claude call)
+│   │       ├── feedback/
+│   │       │   └── route.ts    # 피드백 저장/조회
+│   │       ├── generate/
+│   │       │   └── route.ts    # 문항 생성 (Claude call)
+│   │       ├── explain/
+│   │       │   └── route.ts    # 해설 생성 (Phase 2)
+│   │       └── export/
+│   │           └── route.ts    # 완성 문항 내보내기
+│   │
+│   ├── components/
+│   │   ├── layout/
+│   │   │   └── Dashboard.tsx       # 4-pane 레이아웃 컨테이너
+│   │   ├── pane1/
+│   │   │   ├── SearchPanel.tsx     # 검색 입력 + 필터
+│   │   │   ├── CrawlProgress.tsx   # 크롤링 진행률 바
+│   │   │   └── SourceList.tsx      # 검색 결과 목록
+│   │   ├── pane2/
+│   │   │   ├── PassageList.tsx     # 추출 지문 목록
+│   │   │   ├── PassageCard.tsx     # 개별 지문 카드 (점수, 유형 태그)
+│   │   │   ├── ScoreEditor.tsx     # 점수 인라인 수정
+│   │   │   └── FeedbackModal.tsx   # 피드백 작성 모달
+│   │   ├── pane3/
+│   │   │   ├── QuestionList.tsx    # 생성된 문항 목록
+│   │   │   ├── QuestionCard.tsx    # 개별 문항 카드
+│   │   │   ├── QuestionEditor.tsx  # 문항 수정 (선지, 정답 등)
+│   │   │   └── GenerateControls.tsx # 생성 컨트롤 (개별/전체)
+│   │   ├── pane4/
+│   │   │   └── ExplanationPanel.tsx # 해설 (placeholder)
+│   │   └── shared/
+│   │       ├── FeedbackButton.tsx  # 공통 피드백 버튼
+│   │       └── TypeBadge.tsx       # 유형 태그 뱃지
+│   │
+│   ├── engines/                    # 3개 독립 엔진
+│   │   ├── crawl-evaluate/
+│   │   │   ├── searcher.ts         # API 검색 오케스트레이터
+│   │   │   ├── fetcher.ts          # 전문 다운로더
+│   │   │   ├── extractor.ts        # Claude 지문 추출 (위치 지정)
+│   │   │   ├── validator.ts        # Verbatim 검증
+│   │   │   ├── wordcount.ts        # 단어 수 계산 유틸
+│   │   │   └── scorer.ts           # 적합도 점수 산출
+│   │   ├── question-gen/
+│   │   │   ├── generator.ts        # Claude 문항 생성
+│   │   │   └── feedback-loop.ts    # 피드백 few-shot 주입
+│   │   └── explanation/
+│   │       └── generator.ts        # 해설 생성 (Phase 2)
+│   │
+│   ├── lib/
+│   │   ├── claude.ts               # Anthropic SDK 클라이언트 + tool 정의
+│   │   ├── db.ts                   # DB 연결 (Prisma or Drizzle)
+│   │   ├── embeddings.ts           # 텍스트 임베딩 생성
+│   │   ├── seed-loader.ts          # seed-data/ JSONL 파싱 + DB upsert
+│   │   ├── guidelines-loader.ts    # guidelines.json 파싱 + 유형별 규칙 제공
+│   │   ├── prompt-builder.ts       # system prompt 조립 (guidelines + seed + feedback)
+│   │   ├── example-selector.ts     # Stage별 few-shot 예시 선택 알고리즘
+│   │   └── feedback-retriever.ts   # 유사 피드백 검색 (pgvector)
+│   │
+│   ├── store/
+│   │   └── workbench.ts            # Zustand store (pane간 상태 공유)
+│   │
+│   └── types/
+│       ├── passage.ts              # 지문 관련 타입
+│       ├── question.ts             # 문항 관련 타입
+│       └── feedback.ts             # 피드백 관련 타입
+│
+├── prisma/
+│   └── schema.prisma               # DB schema (위 SQL과 대응)
+│
+└── scripts/
+    ├── load-seed-data.ts            # seed-data/ -> DB 로드 스크립트
+    └── export-training-data.ts      # RunPod fine-tuning용 데이터 export
+
+
+[9] CLAUDE API INTEGRATION DETAIL
+================================================================================
+
+--- 9.1 System Prompt 구조 (지문 평가용) ---
+
+  """
+  당신은 한국 수능 영어 시험의 지문 선별 전문가입니다.
+
+  [역할]
+  학술 원문에서 추출된 영어 지문이 수능 영어 문항으로 적합한지 평가합니다.
+
+  [평가 기준]
+  - topic_depth (0~10): ...
+  - logical_structure (0~10): ...
+  - standalone_coherence (0~10): ...
+  - vocabulary_level (0~10): ...
+  - question_type_fit (0~10): ...
+  - distractor_potential (0~10): ...
+
+  [유형 분류]
+  적합한 문항 유형을 모두 선택: blank, order, insertion, topic, main_idea,
+  vocabulary, irrelevant_sentence
+
+  [출제 지침 - 대전제]                         ← guidelines.json > global
+  {global.passage_rules}
+  단어 수 기준: 일반 {word_count.standard}, 장문 {word_count.jangmun}
+
+  [출제 지침 - {question_type} 유형]           ← guidelines.json > types.{type}
+  지문 요건: {passage_criteria}
+  선지 규칙: {choice_rules}
+  주의사항: {pitfalls}
+
+  [이상적인 기출 예시]                          ← seed data에서 로드
+  === 유형: {question_type} 기출 ===
+  예시 #{n} (question_code: {code}):
+  지문: "{passage_text}"
+  정답: {answer}번
+  단어수: {word_count}
+  (유형별 3~5개 반복)
+
+  [사용자 피드백 히스토리]                      ← feedback DB에서 로드
+  === 최근 승인된 지문 ===
+  {few_shot_approved_feedback}
+
+  === 최근 거부된 지문 ===
+  {few_shot_rejected_feedback}
+
+  출제 지침을 반드시 준수하고, 기출 예시의 패턴을 참고하되,
+  사용자 피드백이 있으면 세부 선호를 우선 반영하세요.
+  """
+
+--- 9.2 Tool Definitions (Claude Messages API) ---
+
+  tools = [
+    extract_passage,      # Section 3.2
+    count_words,          # Section 3.3
+    score_passage,        # 점수 산출 결과 반환
+    generate_question,    # Section 5.2
+  ]
+
+--- 9.3 Verbatim 강제 프롬프트 ---
+
+  지문 추출 시 system prompt에 반드시 포함:
+
+  """
+  [절대 규칙]
+  - 원문에 존재하지 않는 단어, 문장, 표현을 절대 생성하지 마세요.
+  - 당신의 역할은 원문의 "위치"를 지정하는 것이지, 텍스트를 작성하는 것이 아닙니다.
+  - extract_passage 도구를 사용하여 시작/종료 문장 인덱스만 반환하세요.
+  - 원문을 요약, 패러프레이즈, 재구성하지 마세요.
+  """
+
+
+[10] UI/UX DETAIL
+================================================================================
+
+--- 10.1 레이아웃 ---
+
+  메인 대시보드는 수평 스크롤 가능한 multi-pane 구조:
+
+  Desktop (1920px+):
+  +----------+----------+----------+
+  |  Pane 1  |  Pane 2  |  Pane 3  |
+  |  (25%)   |  (40%)   |  (35%)   |
+  +----------+----------+----------+
+
+  Pane 4는 Pane 3 하단의 확장 패널 또는 별도 탭으로 전환.
+  각 Pane은 리사이즈 가능한 divider로 구분.
+
+--- 10.2 Pane 2 - Passage Card 상세 ---
+
+  +--------------------------------------------------+
+  |  [Source: arxiv.org/abs/2301.xxxxx]    155 words  |
+  |                                                   |
+  |  "The relationship between cognitive load and     |
+  |  decision-making has been extensively studied..."  |
+  |                                                   |
+  |  Score: 78/100  [Edit]                            |
+  |  +-----------+-----------+-----------+            |
+  |  | Depth: 8  | Logic: 7  | Vocab: 8  |           |
+  |  | Coher: 7  | TypeFit:8 | Distr: 8  |           |
+  |  +-----------+-----------+-----------+            |
+  |                                                   |
+  |  Types: [blank] [order] [main_idea]               |
+  |                                                   |
+  |  [Approve] [Reject] [Write Feedback]              |
+  +--------------------------------------------------+
+
+
+[11] IMPLEMENTATION PHASES
+================================================================================
+
+Phase 0 - Seed Data 준비 (Week 0, 개발과 병행)
+  [ ] seed-data/ 디렉토리 구조 생성
+  [ ] 유형별 기출 지문 JSONL 작성 (유형당 최소 5개)
+  [ ] 부적합 예시 작성 (10~20개)
+  [ ] 각 지문에 6개 metric 점수 + why_suitable/why_this_type 작성
+  ※ 이 작업은 사용자가 직접 수행. 개발과 동시 진행 가능.
+
+Phase 1 - Foundation (Week 1-2)
+  [ ] Next.js 프로젝트 초기화 + Tailwind/shadcn 설정
+  [ ] PostgreSQL + Prisma schema 구축 (seed_examples 테이블 포함)
+  [ ] Seed data loader 구현 (JSONL -> DB)
+  [ ] Claude API 클라이언트 + tool definitions
+  [ ] Example selector 구현 (Stage 1/2/3 알고리즘)
+  [ ] 기본 4-pane 레이아웃 UI
+
+Phase 2 - Engine 1: Crawl & Evaluate (Week 3-4)
+  [ ] 학술 API 연동 (Semantic Scholar, arXiv, CrossRef)
+  [ ] Full-text fetcher 구현
+  [ ] Passage extractor (Claude + verbatim 검증)
+  [ ] Word count tool integration
+  [ ] Quality scorer 구현
+  [ ] Pane 1 & 2 UI 완성
+
+Phase 3 - Feedback System (Week 5)
+  [ ] Feedback DB + API 구현
+  [ ] pgvector 임베딩 + 유사 피드백 검색
+  [ ] Few-shot injection 파이프라인
+  [ ] Score editor + feedback modal UI
+
+Phase 4 - Engine 2: Question Generation (Week 6-7)
+  [ ] Question generator (Claude + tool calling)
+  [ ] Pane 3 UI (선택/전체 생성, 문항 편집)
+  [ ] Question feedback loop
+
+Phase 5 - Polish & Export (Week 8)
+  [ ] Export 기능 (PDF/HWP/JSON)
+  [ ] 전체 UX 개선
+  [ ] Error handling + edge cases
+
+Phase 6 - Engine 3: Explanations (Future)
+  [ ] 해설 양식 데이터 수집
+  [ ] 해설 생성 엔진
+  [ ] Pane 4 UI
+
+Phase 7 - Fine-tuning (Optional, Future)
+  [ ] Training data export pipeline
+  [ ] RunPod fine-tuning 스크립트
+  [ ] Fine-tuned model 배포 + 통합
+
+
+[12] KEY DESIGN DECISIONS & RATIONALE
+================================================================================
+
+Q: 왜 Claude API 우선이고 HuggingFace/RunPod은 optional인가?
+A: Claude의 few-shot 능력이 충분히 강력하여, 피드백 데이터를 system prompt에
+   주입하는 것만으로 "학습" 효과를 낼 수 있음. Fine-tuning은 데이터 500+개
+   축적 후 비용/품질 트레이드오프를 검증한 뒤 진행해도 늦지 않음.
+
+Q: 왜 verbatim 추출에 인덱스 방식을 쓰는가?
+A: Claude에게 텍스트를 "출력"하게 하면 미세한 변형(환각) 위험이 있음.
+   인덱스만 반환받고 백엔드에서 슬라이싱하면 원문 100% 보장.
+
+Q: 왜 점수 체계를 6개 metric으로 나누는가?
+A: 단일 점수보다 다차원 평가가 사용자 피드백을 더 정밀하게 반영함.
+   "이 지문은 어휘는 좋은데 논리 구조가 약하다" 같은 피드백을 수치화 가능.
+   가중치는 사용자 피드백 패턴에 따라 향후 자동 조정 가능.
+
+Q: 왜 seed data를 JSONL로 관리하는가?
+A: 1) 사용자가 텍스트 에디터에서 직접 작성/수정 가능 (DB 접근 불필요).
+   2) Git으로 버전 관리 가능 (변경 이력 추적).
+   3) 팀 작업 시 파일 단위로 분업 가능.
+   4) DB 로드는 스크립트 한 번 실행으로 자동 처리.
+
+Q: Seed data와 Feedback은 어떤 관계인가?
+A: Seed = 변하지 않는 "정답지" (평가원이 실제 출제한 기출).
+   Feedback = 사용자의 주관적 선호가 반영된 "진화하는 기준".
+   초기엔 Seed가 100%, 피드백이 쌓이면 점진적으로 Feedback 비중 증가.
+   하지만 Seed는 완전히 사라지지 않음 — anchor 역할로 기준선 유지.
+
+Q: Pane 4를 왜 별도 엔진으로 분리하는가?
+A: 해설 생성은 문항 생성과 다른 프롬프트/로직이 필요. 분리하면 각각
+   독립적으로 개선 가능하고, 해설 양식이 확정되지 않은 현 상태에서도
+   다른 기능 개발에 영향 없음.
+
+
+================================================================================
+  END OF ARCHITECTURE DOCUMENT
+================================================================================

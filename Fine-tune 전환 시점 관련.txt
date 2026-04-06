@@ -1,0 +1,39 @@
+피드백 데이터 양
+데이터 양	효과
+50~100개	LoRA 최소 기준. 눈에 띄는 개선이 시작됨
+200~500개	실용적 품질. 대부분의 use case에서 충분
+500~1000개	안정적인 성능. 이 프로젝트의 목표 수준
+1000개+	수확 체감. 이 이상은 데이터 품질이 더 중요
+즉, 현재 상태에서 지문 200~300개에 대해 approve/reject + 코멘트를 쌓으면 fine-tuning을 시작할 수 있습니다. 매일 20~30개씩 피드백하면 약 2주.
+
+지속적 학습 (Continual Learning)
+LoRA는 매번 다시 튜닝해야 하지만, 비용이 매우 낮아서 실질적 문제가 아닙니다.
+
+방식	비용 (RunPod)	시간	설명
+LoRA 전체 재훈련	$13	30분~1시간	이전 데이터 + 새 데이터 전부로 재훈련
+LoRA 이어 훈련	$0.51	15~30분	기존 LoRA 위에 새 데이터만 추가 (가능하지만 drift 위험)
+Full fine-tune	$10~30+	수시간	불필요. LoRA로 충분
+현실적 워크플로우: 피드백 100개 추가될 때마다 LoRA 재훈련 ($2, 1시간) → 새 어댑터 배포. 월 1~2회 정도.
+
+모델 추천
+모델	VRAM	LoRA VRAM	한국어	추론 속도	추천도
+Qwen2.5-7B	16GB	8GB	매우 좋음	빠름	최추천
+Llama-3.1-8B	16GB	10GB	보통	빠름	좋음
+Mistral-7B	16GB	8GB	약함	매우 빠름	보통
+Gemma-2-9B	20GB	12GB	좋음	보통	좋음
+Llama-3.1-70B	140GB	48GB	좋음	느림	과잉
+Qwen2.5-7B를 추천하는 이유:
+
+한국어 성능이 7B급 최고 — 이 프로젝트에서 피드백/코멘트가 한국어이므로 중요
+LoRA가 8GB VRAM에서 가능 — RunPod에서 A40(48GB, $0.39/hr) 대신 **RTX 4090(24GB, $0.34/hr)**으로도 충분
+추론도 가벼움 — RunPod Serverless로 배포 시 cold start가 빠름
+Tool calling 지원 — 현재 score_passage tool schema를 그대로 활용 가능
+훈련 비용: 500개 데이터 LoRA ≈ $1.5 (RTX 4090 × 40분)
+Llama-3.1-8B도 좋지만, 한국어가 이 작업에서 핵심(guidelines, 피드백, 출제 힌트가 전부 한국어)이므로 Qwen2.5가 더 적합합니다.
+
+전체 로드맵
+
+현재 (few-shot)          →  피드백 200개+  →  LoRA fine-tune  →  배포
+Claude Haiku로 평가         데이터 축적        Qwen2.5-7B         RunPod Serverless
+$0.002/call                2~3주              $1.5/회 훈련        $0.0003/call
+Fine-tuned Qwen으로 전환하면 Claude API 비용이 사실상 0이 됩니다 (Extract/Score를 자체 모델로 대체). Generate(문항 생성)만 Claude Sonnet을 유지

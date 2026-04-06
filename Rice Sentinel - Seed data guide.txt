@@ -1,0 +1,125 @@
+================================================================================
+  Rice Sentinel - Seed Data 가이드
+  초기 학습 데이터 작성법
+================================================================================
+
+[목적]
+사용자 피드백이 아직 없는 초기 상태에서, Claude가 "좋은 수능 지문이란 무엇인가"를
+이해할 수 있도록 실제 평가원 기출 문항을 정리한 골든 데이터셋.
+
+이 데이터는 Claude system prompt에 few-shot example로 주입되어,
+첫 번째 크롤링부터 정확한 기준으로 지문을 평가/선별할 수 있게 함.
+
+
+[파일 구조]
+
+  seed-data/
+  ├── README.txt              # 이 문서
+  ├── passages/               # 유형별 기출 지문
+  │   ├── blank.jsonl         # 빈칸 추론
+  │   ├── order.jsonl         # 순서 배열
+  │   ├── insertion.jsonl     # 문장 삽입
+  │   ├── topic.jsonl         # 주제/제목
+  │   ├── main_idea.jsonl     # 요지/주장
+  │   ├── vocabulary.jsonl    # 어휘
+  │   └── irrelevant.jsonl    # 무관한 문장
+  └── negative/               # "부적합" 예시 (선택사항)
+      └── rejected.jsonl      # 수능 지문으로 부적합한 예시
+
+
+[JSONL 포맷 상세]
+
+각 .jsonl 파일은 한 줄에 하나의 JSON 객체.
+사용자가 텍스트 에디터에서 직접 작성 가능.
+
+--- 한 줄의 구조 (보기 좋게 펼침) ---
+
+{
+  "question_code": 240631,
+  "question_number": 31,
+  "question_type": "blank",
+
+  "passage": "The relationship between cognitive load and decision-making has been extensively studied in the field of psychology. When individuals are presented with an overwhelming amount of information, their ability to make rational choices significantly diminishes. This phenomenon, known as information overload, suggests that more data does not necessarily lead to better decisions. In fact, research has shown that people tend to rely on simple heuristics or mental shortcuts when faced with _______________. These shortcuts, while efficient, can lead to systematic biases and errors in judgment.",
+
+  "word_count": 82,
+
+  "scores": {
+    "topic_depth": 8,
+    "logical_structure": 9,
+    "standalone_coherence": 8,
+    "vocabulary_level": 7,
+    "question_type_fit": 9,
+    "distractor_potential": 8
+  },
+
+  "why_suitable": "주장-근거-결론의 논리 흐름이 명확하고, 빈칸이 논리적 귀결 위치에 놓여 있어 추론을 요구함. 어휘 난이도가 수능 수준에 적합하며 심리학이라는 학술 주제를 다루면서도 배경지식 없이 이해 가능.",
+
+  "why_this_type": "논리 전개의 핵심 연결부에 빈칸을 넣을 수 있는 구조. 매력적인 오답 선지 생성이 용이 (예: 'too many options' vs 'complex situations' vs 'cognitive overload').",
+
+  "difficulty": "중상",
+
+  "tags": ["psychology", "decision-making", "cognition"]
+}
+
+
+[필드 설명]
+
+필수 필드:
+  question_code     문항 코드 (yymmnn, yy=시행 학년도, mm= 모의고사 시행월, nn= 문항번호)
+  question_number   문항 번호 (question_code의 nn부분)
+  question_type     문항 유형 (question_number에 따른 정해진 값) 
+                    "blank" | "order" | "insertion" | "topic" |
+                    "main_idea" | "vocabulary" | "irrelevant"
+  passage           지문 원문 (실제 시험지 그대로)
+  word_count        단어 수
+  scores            6개 metric 각각 0~10 점수 (사용자 주관 평가)
+  why_suitable      이 지문이 수능 지문으로 적합한 이유 (한국어)
+  why_this_type     이 유형에 특히 적합한 이유 (한국어)
+
+선택 필드:
+  difficulty        "하" | "중하" | "중" | "중상" | "상"
+  tags              주제 키워드 (영어)
+  notes             추가 메모
+
+
+[작성 팁]
+
+1. 유형당 최소 5개, 이상적으로 10~15개 정도면 충분한 초기 품질 확보 가능.
+   많을수록 좋지만, 5개만으로도 시작 가능.
+
+2. "왜 좋은 지문인가"를 구체적으로 적어야 함.
+   X: "좋은 지문이다"
+   O: "인과관계가 명확하여 빈칸 위치에 따라 추론의 난이도 조절이 가능하며,
+       전문 용어(heuristics)가 문맥에서 유추 가능한 수준으로 사용됨"
+
+3. 점수는 상대적이 아닌 절대적 기준으로 매길 것.
+   8점 = "수능 지문으로 매우 적합", 5점 = "사용 가능하나 아쉬운 점 있음"
+
+4. negative/rejected.jsonl에는 "얼핏 괜찮아 보이지만 부적합한" 예시를 넣으면
+   모델이 경계 사례를 학습하는 데 매우 효과적.
+   예: 너무 쉬운 지문, 배경지식 필요한 지문, 논리 구조가 약한 지문
+
+5. 한 지문이 여러 유형에 적합하면, 각 유형 파일에 중복 등록하되
+   why_this_type만 유형에 맞게 다르게 작성.
+
+
+[실제 작성 예시 - blank.jsonl의 한 줄]
+
+아래를 그대로 한 줄로 복사하여 사용:
+
+{"question_code":240631,"question_number":31,"question_type":"blank","passage":"여기에 실제 기출 지문 전문을 넣으세요...","word_count":162,"scores":{"topic_depth":8,"logical_structure":9,"standalone_coherence":8,"vocabulary_level":7,"question_type_fit":9,"distractor_potential":8},"why_suitable":"적합한 이유를 구체적으로...","why_this_type":"이 유형에 적합한 이유를...","difficulty":"중상","tags":["psychology","cognition"]}
+
+
+[시스템에서의 사용 방식]
+
+이 데이터는 다음과 같이 활용됨:
+
+1. 서버 시작 시 seed-data/ 디렉토리의 모든 .jsonl 파일을 파싱
+2. DB의 seed_examples 테이블에 로드 (또는 메모리 캐시)
+3. Claude API 호출 시, 요청된 유형에 해당하는 seed example을 선별
+4. System prompt의 [참고: 이상적인 지문 예시] 섹션에 삽입
+5. 사용자 피드백이 쌓이면, seed + feedback 모두 활용하되
+   최신 피드백에 더 높은 가중치 부여
+
+  즉, seed data는 "cold start" 문제를 해결하는 초기 부스터이며,
+  사용자 피드백이 쌓일수록 자연스럽게 보완/대체됨.

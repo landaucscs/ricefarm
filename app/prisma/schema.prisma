@@ -1,0 +1,159 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// -- Seed Data (평가원 기출) --------------------------------------------------
+
+model SeedExample {
+  id              String   @id @default(uuid())
+  questionCode    Int      @unique
+  questionNumber  Int
+  questionType    String
+  passage         String   // 지문 + 선지 포함 원문
+  passageOnly     String?  // 선지 분리된 순수 지문
+  choices         String?  // JSON array of choices
+  wordCount       Int
+  answer          Int
+  isJangmun       Boolean  @default(false)
+  jangmunNote     String?
+  jangmunGroupId  String?  // 같은 지문 공유하는 장문 세트 (예: "2306_41_42")
+  jangmunSubType  String?  // "jangmun_title" | "jangmun_vocabulary"
+  createdAt       DateTime @default(now())
+
+  @@index([questionType])
+  @@index([jangmunGroupId])
+}
+
+// -- Crawled Sources ----------------------------------------------------------
+
+model Source {
+  id         String    @id @default(uuid())
+  title      String
+  authors    String    // JSON array
+  sourceUrl  String
+  repository String
+  fullText   String?
+  fetchedAt  DateTime  @default(now())
+  passages   Passage[]
+}
+
+// -- Extracted Passages -------------------------------------------------------
+
+model Passage {
+  id                  String              @id @default(uuid())
+  sourceId            String
+  text                String
+  startIndex          Int
+  endIndex            Int
+  wordCount           Int
+  status              String              @default("pending") // pending | approved | rejected
+  isJangmunCandidate  Boolean             @default(false) // 250~280w -> 장문 후보
+  createdAt           DateTime            @default(now())
+
+  source     Source              @relation(fields: [sourceId], references: [id])
+  scores     PassageScore[]
+  feedback   PassageFeedback[]
+  questions  GeneratedQuestion[]
+
+  @@index([status])
+  @@index([sourceId])
+}
+
+// -- Passage Scores -----------------------------------------------------------
+
+model PassageScore {
+  id                   String   @id @default(uuid())
+  passageId            String
+  scorer               String   // 'ai' | 'user'
+  topicDepth           Int
+  logicalStructure     Int
+  standaloneCoherence  Int
+  vocabularyLevel      Int
+  questionTypeFit      Int
+  distractorPotential  Int
+  totalWeighted        Float
+  questionTypes        String   // JSON array of types
+  comment              String?
+  createdAt            DateTime @default(now())
+
+  passage              Passage  @relation(fields: [passageId], references: [id])
+
+  @@index([passageId])
+}
+
+// -- Passage Feedback ---------------------------------------------------------
+
+model PassageFeedback {
+  id            String   @id @default(uuid())
+  passageId     String
+  approved      Boolean
+  aiScores      String?  // JSON of PassageScoreMetrics
+  userScores    String?  // JSON of PassageScoreMetrics
+  questionTypes String   // JSON array
+  comment       String?
+  createdAt     DateTime @default(now())
+
+  passage       Passage  @relation(fields: [passageId], references: [id])
+
+  @@index([passageId])
+}
+
+// -- Generated Questions ------------------------------------------------------
+
+model GeneratedQuestion {
+  id                   String             @id @default(uuid())
+  passageId            String
+  questionType         String
+  questionText         String
+  passageModified      String
+  choices              String             // JSON array of 5 choices
+  correctAnswer        Int
+  distractorRationale  String?
+  status               String             @default("draft") // draft | approved | rejected
+  createdAt            DateTime           @default(now())
+
+  passage              Passage            @relation(fields: [passageId], references: [id])
+  feedback             QuestionFeedback[]
+
+  @@index([passageId])
+  @@index([questionType])
+}
+
+// -- Question Feedback --------------------------------------------------------
+
+model QuestionFeedback {
+  id          String            @id @default(uuid())
+  questionId  String
+  score       Int
+  comment     String?
+  corrections String?           // JSON of corrections
+  createdAt   DateTime          @default(now())
+
+  question    GeneratedQuestion @relation(fields: [questionId], references: [id])
+
+  @@index([questionId])
+}
+
+// -- Explanations (Phase 2) ---------------------------------------------------
+
+model Explanation {
+  id         String   @id @default(uuid())
+  questionId String
+  templateId String?
+  content    String
+  status     String   @default("draft")
+  createdAt  DateTime @default(now())
+}
+
+model ExplanationTemplate {
+  id        String   @id @default(uuid())
+  name      String
+  structure String   // JSON
+  example   String?
+  createdAt DateTime @default(now())
+}

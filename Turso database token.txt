@@ -1,0 +1,7 @@
+Turso 
+
+Database url: 
+libsql://ricefarm-landaucscs.aws-ap-northeast-1.turso.io
+
+Token:
+eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NzU0MzU1MDUsImlkIjoiMDE5ZDYwMzMtOGIwMS03MzA0LWFmMmYtOGJjN2FkNzk0ZGIwIiwicmlkIjoiMTM3MjJiNWQtOWFlNy00YzM4LThlNzMtODYyMjM2NTVlZDQ2In0.dQCSGrJCGH17l8bP3nQUe1IUzZKMLzJOy5AQCMDrYkAA6Dg8P1MMDtxEJwGU_GtEOKmZBEWOjbj3XRM3BLVyAQ
