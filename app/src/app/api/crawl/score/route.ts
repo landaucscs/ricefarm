@@ -1,22 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { EVALUATION_TOOLS, MODEL_HAIKU } from '@/lib/claude';
-import { runWithTools, findToolCall } from '@/lib/claude-runner';
+import { geminiJsonCall } from '@/lib/gemini';
 import { buildEvaluationPrompt } from '@/lib/prompt-builder';
 import { prisma } from '@/lib/db';
 import type { QuestionType } from '@/types';
 
+interface GeminiScoreResponse {
+  topic_depth: number;
+  logical_structure: number;
+  standalone_coherence: number;
+  vocabulary_level: number;
+  question_type_fit: number;
+  distractor_potential: number;
+  question_types: string[];
+  reasoning: string;
+  type_hints?: Record<string, Record<string, unknown>>;
+}
+
 /**
  * POST /api/crawl/score
  *
- * ricefarm: Claude 2차 정밀 평가 (상위 후보에만 사용)
- * Gemini 1차 평가는 crawl/extract 라우트에서 자동으로 수행됨.
- * 이 라우트는 사용자가 수동으로 Claude 재평가를 요청할 때 사용.
- *
- * Body: {
- *   passage: { text, startIndex, endIndex, wordCount, sourceTitle, sourceUrl, repository, authors, isJangmunCandidate },
- *   questionType: QuestionType,
- *   passageId?: string   // 기존 passage DB ID (있으면 기존 레코드에 점수 추가)
- * }
+ * ricefarm: Gemini 기반 평가 (토큰 0)
+ * 사용자가 수동으로 재평가를 요청할 때 사용.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -38,33 +42,42 @@ export async function POST(request: NextRequest) {
 
     const systemPrompt = await buildEvaluationPrompt(questionType);
 
-    const result = await runWithTools({
-      system: systemPrompt,
-      tools: EVALUATION_TOOLS,
-      model: MODEL_HAIKU,
-      userMessage: `다음 지문을 "${questionType}" 유형 수능 문항 적합도 관점에서 평가해주세요.
-count_words로 단어 수 확인 후 score_passage로 점수를 매겨주세요.
+    const userMessage = `다음 지문을 "${questionType}" 유형 수능 문항 적합도 관점에서 평가하세요.
+
+JSON 형식으로 응답:
+{
+  "topic_depth": 0~10,
+  "logical_structure": 0~10,
+  "standalone_coherence": 0~10,
+  "vocabulary_level": 0~10,
+  "question_type_fit": 0~10,
+  "distractor_potential": 0~10,
+  "question_types": ["적합한 유형 코드 배열"],
+  "reasoning": "평가 근거",
+  "type_hints": { "유형코드": { 유형별 출제 힌트 } }
+}
 
 지문:
 """
 ${passage.text}
 """
 
-출처: ${passage.sourceTitle}`,
-    });
+출처: ${passage.sourceTitle}
+단어 수: ${passage.wordCount}`;
 
-    const scoresInput = findToolCall(result, 'score_passage');
-    if (!scoresInput) {
+    const response = await geminiJsonCall<GeminiScoreResponse>(systemPrompt, userMessage);
+
+    if (!response) {
       return NextResponse.json({ success: true, scored: null, reason: 'Scoring failed' });
     }
 
     const scores = {
-      topicDepth: Number(scoresInput.topic_depth) || 0,
-      logicalStructure: Number(scoresInput.logical_structure) || 0,
-      standaloneCoherence: Number(scoresInput.standalone_coherence) || 0,
-      vocabularyLevel: Number(scoresInput.vocabulary_level) || 0,
-      questionTypeFit: Number(scoresInput.question_type_fit) || 0,
-      distractorPotential: Number(scoresInput.distractor_potential) || 0,
+      topicDepth: Number(response.topic_depth) || 0,
+      logicalStructure: Number(response.logical_structure) || 0,
+      standaloneCoherence: Number(response.standalone_coherence) || 0,
+      vocabularyLevel: Number(response.vocabulary_level) || 0,
+      questionTypeFit: Number(response.question_type_fit) || 0,
+      distractorPotential: Number(response.distractor_potential) || 0,
     };
 
     const totalWeighted = Math.round(
@@ -73,15 +86,14 @@ ${passage.text}
        scores.questionTypeFit * 20 + scores.distractorPotential * 15) / 10
     );
 
-    const suggestedTypes = (scoresInput.question_types as string[]) || [];
-    const typeHints = (scoresInput.type_hints as Record<string, unknown>) || {};
+    const suggestedTypes = response.question_types || [];
+    const typeHints = response.type_hints || {};
 
     const commentData = JSON.stringify({
-      reasoning: String(scoresInput.reasoning || ''),
+      reasoning: response.reasoning || '',
       typeHints,
     });
 
-    // DB 저장: passageId가 있으면 기존 passage에 Claude 점수 추가
     let dbPassageId = passageId;
 
     if (!dbPassageId) {
@@ -109,11 +121,10 @@ ${passage.text}
       dbPassageId = dbPassage.id;
     }
 
-    // Claude 점수를 별도 레코드로 저장 (scorer: 'claude')
     await prisma.passageScore.create({
       data: {
         passageId: dbPassageId,
-        scorer: 'claude',
+        scorer: 'ai',
         ...scores,
         totalWeighted,
         questionTypes: JSON.stringify(suggestedTypes),
@@ -135,7 +146,7 @@ ${passage.text}
         suggestedTypes,
         isJangmunCandidate: passage.isJangmunCandidate,
         typeHints,
-        scoredBy: 'claude',
+        scoredBy: 'gemini',
       },
     });
   } catch (error) {
