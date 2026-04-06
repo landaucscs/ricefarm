@@ -10,17 +10,9 @@ import type { QuestionType, RepositoryId } from '@/types';
 /**
  * POST /api/crawl
  *
- * ricefarm 파이프라인 (토큰 최소화):
+ * ricefarm 파이프라인 (Gemini only, 토큰 비용 0):
  *   Search (코드) → Fetch (코드) → Pre-filter (코드) → Extract (강화 룰)
- *   → Score 1차 (Gemini 무료) → Score 2차 (Claude, 상위 N개만)
- *
- * Body: {
- *   query: string,
- *   questionTypes: QuestionType[],
- *   repositories: RepositoryId[],
- *   perPage?: number,
- *   claudeTopN?: number   // Claude 2차 평가 대상 수 (기본 3)
- * }
+ *   → Score (Gemini 무료) → DB 저장
  */
 export async function POST(request: NextRequest) {
   try {
@@ -97,24 +89,14 @@ export async function POST(request: NextRequest) {
 
     // ── Step 4: Gemini 1차 평가 (무료, 토큰 0) ───────────────────
     const geminiScored: GeminiScoredPassage[] = [];
-    const geminiFailedButKept = [];
-
     for (const candidate of allCandidates) {
       try {
         const scored = await scoreWithGemini(candidate, primaryType);
         if (scored) {
           geminiScored.push(scored);
-        } else {
-          // Gemini 실패해도 rule qualityScore가 높으면 유지
-          if (candidate.qualityScore >= 50) {
-            geminiFailedButKept.push(candidate);
-          }
         }
       } catch (err) {
         console.error(`Gemini scoring failed for passage from: ${candidate.sourceDocument.searchResult.title}`, err);
-        if (candidate.qualityScore >= 50) {
-          geminiFailedButKept.push(candidate);
-        }
       }
     }
 

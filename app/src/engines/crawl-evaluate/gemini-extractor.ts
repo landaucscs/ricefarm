@@ -90,6 +90,8 @@ ${numberedText}`;
         endIndex: end,
         wordCount: wc,
         isJangmunCandidate: isJangmun,
+        qualityScore: 50,  // Gemini 추출은 기본 점수
+        reasoning: p.reasoning || 'Gemini extracted',
         sourceDocument: document,
       });
 

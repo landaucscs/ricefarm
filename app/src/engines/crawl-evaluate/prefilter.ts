@@ -5,7 +5,7 @@
  */
 
 import type { FetchedDocument } from './fetcher';
-import { countWords } from '@/lib/claude';
+import { countWords } from '@/lib/word-count';
 
 export interface PrefilterResult {
   pass: boolean;

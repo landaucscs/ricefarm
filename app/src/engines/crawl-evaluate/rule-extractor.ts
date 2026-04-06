@@ -9,7 +9,7 @@
  * 4. 복합 품질 점수 기반 정렬
  */
 
-import { countWords } from '@/lib/claude';
+import { countWords } from '@/lib/word-count';
 import type { FetchedDocument } from './fetcher';
 
 export interface RuleExtractedPassage {

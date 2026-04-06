@@ -4,7 +4,7 @@
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { countWords } from './claude';
+import { countWords } from './word-count';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
